@@ -5,7 +5,7 @@ on:
       - master
       - 'release/**'
       - 'hotfix-v**'
-      - patch-*
+      - develop
 
 jobs:
   kubectl-plugin:
@@ -25,4 +25,3 @@ jobs:
       with:
         name: kubectl-mayastor.exe
         path: ./result/bin/kubectl-mayastor.exe
-    - run: nix-build -A utils.release.apple-darwin.kubectl-plugin
