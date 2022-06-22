@@ -12,5 +12,7 @@ spaces_around_ranges = true
 edition = "2018"
 
 ignore = [
-    "openapi"
+    "openapi",
+    "utils/dependencies",
+    "license"
 ]

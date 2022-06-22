@@ -2,13 +2,13 @@
 
 set -e
 
-DIR_NAME="$(dirname "$(pwd)/${BASH_SOURCE[0]}")"
+DIR_NAME="$(dirname "$(realpath "${BASH_SOURCE[0]:-"$0"}")")"
 export ROOT_DIR="$DIR_NAME/../.."
 TESTS_DIR="$ROOT_DIR"/tests
 BDD_DIR="$TESTS_DIR"/bdd
 VENV_DIR="$BDD_DIR/venv"
 CSI_OUT="$DIR_NAME/autogen"
-CSI_PROTO="$DIR_NAME"/../../rpc/mayastor-api/protobuf/
+CSI_PROTO="$DIR_NAME"/../../rpc/api/protobuf/
 
 virtualenv --no-setuptools "$VENV_DIR"
 

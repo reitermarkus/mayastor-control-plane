@@ -1,10 +1,7 @@
 use crate::node::service::NodeCommsTimeout;
 use common::errors::{GrpcConnect, GrpcConnectUri, SvcError};
-use common_lib::{
-    mbus_api::{bus, MessageIdTimeout},
-    types::v0::message_bus::NodeId,
-};
-use rpc::mayastor::mayastor_client::MayastorClient;
+use common_lib::{mbus_api::MessageIdTimeout, types::v0::message_bus::NodeId};
+use rpc::io_engine::IoEngineClient;
 use snafu::ResultExt;
 use std::{
     ops::{Deref, DerefMut},
@@ -33,7 +30,7 @@ impl GrpcContext {
         node: &NodeId,
         endpoint: &str,
         comms_timeouts: &NodeCommsTimeout,
-        request: Option<T>,
+        _request: Option<T>,
     ) -> Result<Self, SvcError> {
         let uri = format!("http://{}", endpoint);
         let uri = http::uri::Uri::from_str(&uri).context(GrpcConnectUri {
@@ -41,13 +38,13 @@ impl GrpcContext {
             uri: uri.clone(),
         })?;
 
-        let timeout = request
-            .map(|r| r.timeout(comms_timeouts.request(), &bus()))
-            .unwrap_or_else(|| comms_timeouts.request());
+        // let timeout = request
+        //     .map(|r| r.timeout(comms_timeouts.request(), &bus()))
+        //     .unwrap_or_else(|| comms_timeouts.request());
 
         let endpoint = tonic::transport::Endpoint::from(uri)
             .connect_timeout(comms_timeouts.connect() + Duration::from_millis(500))
-            .timeout(timeout);
+            .timeout(comms_timeouts.request());
 
         Ok(Self {
             node: node.clone(),
@@ -57,16 +54,16 @@ impl GrpcContext {
         })
     }
     /// Override the timeout config in the context for the given request
-    fn override_timeout<R: MessageIdTimeout>(&mut self, request: Option<R>) {
-        let timeout = request
-            .map(|r| r.timeout(self.comms_timeouts.request(), &bus()))
-            .unwrap_or_else(|| self.comms_timeouts.request());
+    fn override_timeout<R: MessageIdTimeout>(&mut self, _request: Option<R>) {
+        // let timeout = request
+        //     .map(|r| r.timeout(self.comms_timeouts.request(), &bus()))
+        //     .unwrap_or_else(|| self.comms_timeouts.request());
 
         self.endpoint = self
             .endpoint
             .clone()
             .connect_timeout(self.comms_timeouts.connect() + Duration::from_millis(500))
-            .timeout(timeout);
+            .timeout(self.comms_timeouts.request());
     }
     pub(crate) async fn lock(&self) -> GrpcLockGuard {
         self.lock.clone().lock_owned().await
@@ -86,10 +83,10 @@ impl GrpcContext {
 pub(crate) struct GrpcClient {
     #[allow(dead_code)]
     context: GrpcContext,
-    /// gRPC Mayastor Client
-    pub(crate) mayastor: MayaClient,
+    /// gRPC IoEngine Client
+    pub(crate) io_engine: MayaClient,
 }
-pub(crate) type MayaClient = MayastorClient<Channel>;
+pub(crate) type MayaClient = IoEngineClient<Channel>;
 impl GrpcClient {
     pub(crate) async fn new(context: &GrpcContext) -> Result<Self, SvcError> {
         let client = match tokio::time::timeout(
@@ -111,7 +108,7 @@ impl GrpcClient {
 
         Ok(Self {
             context: context.clone(),
-            mayastor: client,
+            io_engine: client,
         })
     }
 }

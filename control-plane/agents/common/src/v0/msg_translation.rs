@@ -10,7 +10,7 @@ use common_lib::{
         openapi::apis::IntoVec,
     },
 };
-use rpc::mayastor as rpc;
+use rpc::io_engine as rpc;
 use std::convert::TryFrom;
 
 /// Trait for converting rpc messages to message bus messages.
@@ -265,6 +265,7 @@ impl MessageBusToRpc for message_bus::CreateNexus {
             resv_key: nexus_config.resv_key(),
             preempt_key: nexus_config.preempt_key(),
             children: self.children.clone().into_vec(),
+            nexus_info_key: self.nexus_info_key(),
         }
     }
 }

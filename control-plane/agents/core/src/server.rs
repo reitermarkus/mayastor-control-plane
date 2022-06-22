@@ -4,27 +4,26 @@ pub mod lib;
 pub mod nexus;
 pub mod node;
 pub mod pool;
+pub mod registry;
 pub mod volume;
 pub mod watcher;
 
-use crate::core::registry;
 use common_lib::types::v0::message_bus::ChannelVs;
 use http::Uri;
 
-use common_lib::{mbus_api::BusClient, opentelemetry::default_tracing_tags};
-use opentelemetry::{global, sdk::propagation::TraceContextPropagator, KeyValue};
+use crate::core::registry::NumRebuilds;
+use common_lib::mbus_api::BusClient;
+use opentelemetry::{global, KeyValue};
 use structopt::StructOpt;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Registry};
-use utils::{package_info, DEFAULT_GRPC_SERVER_ADDR};
+use utils::{version_info_str, DEFAULT_GRPC_SERVER_ADDR};
 
 #[derive(Debug, StructOpt)]
-#[structopt(version = package_info!())]
+#[structopt(name = utils::package_description!(), version = version_info_str!())]
 pub(crate) struct CliArgs {
     /// The Nats Server URL to connect to
     /// (supports the nats schema)
-    /// Default: nats://127.0.0.1:4222
-    #[structopt(long, short, default_value = "nats://127.0.0.1:4222")]
-    pub(crate) nats: String,
+    #[structopt(long, short)]
+    pub(crate) nats: Option<String>,
 
     /// The period at which the registry updates its cache of all
     /// resources from all nodes
@@ -39,14 +38,12 @@ pub(crate) struct CliArgs {
     #[structopt(long, default_value = "10s")]
     pub(crate) reconcile_period: humantime::Duration,
 
-    /// Deadline for the mayastor instance keep alive registration
-    /// Default: 10s
+    /// Deadline for the io-engine instance keep alive registration
     #[structopt(long, short, default_value = "10s")]
     pub(crate) deadline: humantime::Duration,
 
     /// The Persistent Store URLs to connect to
     /// (supports the http/https schema)
-    /// Default: http://localhost:2379
     #[structopt(long, short, default_value = "http://localhost:2379")]
     pub(crate) store: String,
 
@@ -67,13 +64,12 @@ pub(crate) struct CliArgs {
     pub(crate) request_timeout: humantime::Duration,
 
     /// Add process service tags to the traces
-    #[structopt(short, long, env = "TRACING_TAGS", value_delimiter=",", parse(try_from_str = common_lib::opentelemetry::parse_key_value))]
+    #[structopt(short, long, env = "TRACING_TAGS", value_delimiter=",", parse(try_from_str = utils::tracing_telemetry::parse_key_value))]
     tracing_tags: Vec<KeyValue>,
 
     /// Don't use minimum timeouts for specific requests
     #[structopt(long)]
     no_min_timeouts: bool,
-
     /// Trace rest requests to the Jaeger endpoint agent
     #[structopt(long, short)]
     jaeger: Option<String>,
@@ -81,6 +77,10 @@ pub(crate) struct CliArgs {
     /// (supports the http/https schema)
     #[structopt(long, short, default_value = DEFAULT_GRPC_SERVER_ADDR)]
     pub(crate) grpc_server_addr: Uri,
+    /// The maximum number of system-wide rebuilds permitted at any given time.
+    /// If `None` do not limit the number of rebuilds.
+    #[structopt(long)]
+    max_rebuilds: Option<NumRebuilds>,
 }
 impl CliArgs {
     fn args() -> Self {
@@ -88,74 +88,29 @@ impl CliArgs {
     }
 }
 
-const RUST_LOG_QUIET_DEFAULTS: &str =
-    "h2=info,hyper=info,tower_buffer=info,tower=info,rustls=info,reqwest=info,tokio_util=info,async_io=info,polling=info,tonic=info,want=info,mio=info";
-
-fn rust_log_add_quiet_defaults(
-    current: tracing_subscriber::EnvFilter,
-) -> tracing_subscriber::EnvFilter {
-    let main = match current.to_string().as_str() {
-        "debug" => "debug",
-        "trace" => "trace",
-        _ => return current,
-    };
-    let logs = format!("{},{}", main, RUST_LOG_QUIET_DEFAULTS);
-    tracing_subscriber::EnvFilter::try_new(logs).unwrap()
-}
-
-fn init_tracing() {
-    let filter = rust_log_add_quiet_defaults(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-    );
-
-    let subscriber = Registry::default()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().pretty());
-
-    match CliArgs::args().jaeger {
-        Some(jaeger) => {
-            let mut tracing_tags = CliArgs::args().tracing_tags;
-            tracing_tags.append(&mut default_tracing_tags(
-                utils::git_version(),
-                env!("CARGO_PKG_VERSION"),
-            ));
-            tracing_tags.dedup();
-            println!("Using the following tracing tags: {:?}", tracing_tags);
-
-            common_lib::opentelemetry::set_jaeger_env();
-
-            global::set_text_map_propagator(TraceContextPropagator::new());
-            let tracer = opentelemetry_jaeger::new_pipeline()
-                .with_agent_endpoint(jaeger)
-                .with_service_name("core-agent")
-                .with_tags(tracing_tags)
-                .install_batch(opentelemetry::runtime::TokioCurrentThread)
-                .expect("Should be able to initialise the exporter");
-            let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-            subscriber.with(telemetry).init();
-        }
-        None => subscriber.init(),
-    };
-}
-
 #[tokio::main]
 async fn main() {
     let cli_args = CliArgs::args();
     utils::print_package_info!();
     println!("Using options: {:?}", &cli_args);
-    init_tracing();
+    utils::tracing_telemetry::init_tracing(
+        "core-agent",
+        cli_args.tracing_tags.clone(),
+        cli_args.jaeger.clone(),
+    );
     server(cli_args).await;
 }
 
 async fn server(cli_args: CliArgs) {
-    let registry = registry::Registry::new(
+    common_lib::init_cluster_info_or_panic().await;
+    let registry = core::registry::Registry::new(
         cli_args.cache_period.into(),
         cli_args.store.clone(),
         cli_args.store_timeout.into(),
         cli_args.store_lease_ttl.into(),
         cli_args.reconcile_period.into(),
         cli_args.reconcile_idle_period.into(),
+        cli_args.max_rebuilds,
     )
     .await;
 
@@ -171,11 +126,11 @@ async fn server(cli_args: CliArgs) {
         .with_shared_state(cli_args.grpc_server_addr.clone())
         .configure_async(node::configure)
         .await
-        .configure_async(pool::configure)
-        .await
+        .configure(pool::configure)
         .configure(nexus::configure)
         .configure(volume::configure)
-        .configure(watcher::configure);
+        .configure(watcher::configure)
+        .configure(registry::configure);
 
     let service = lib::Service::new(base_service);
     registry.start().await;

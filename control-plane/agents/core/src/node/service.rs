@@ -8,11 +8,18 @@ use common::{
     v0::msg_translation::RpcToMessageBus,
 };
 use common_lib::types::v0::message_bus::{
-    Filter, GetSpecs, Node, NodeId, NodeState, NodeStatus, Specs, States,
+    Deregister, Filter, Node, NodeId, NodeState, NodeStatus, Register, States,
 };
 
 use crate::core::wrapper::InternalOps;
-use rpc::mayastor::ListBlockDevicesRequest;
+use grpc::{
+    context::Context,
+    operations::{
+        node::traits::{GetBlockDeviceInfo, NodeOperations},
+        registration::traits::{DeregisterInfo, RegisterInfo, RegistrationOperations},
+    },
+};
+use rpc::io_engine::ListBlockDevicesRequest;
 use snafu::ResultExt;
 use std::{collections::HashMap, sync::Arc};
 
@@ -51,6 +58,45 @@ impl NodeCommsTimeout {
     }
 }
 
+#[tonic::async_trait]
+impl NodeOperations for Service {
+    async fn get(&self, filter: Filter, _ctx: Option<Context>) -> Result<Nodes, ReplyError> {
+        let req = GetNodes::new(filter);
+        let nodes = self.get_nodes(&req).await?;
+        Ok(nodes)
+    }
+    async fn probe(&self, _ctx: Option<Context>) -> Result<bool, ReplyError> {
+        return Ok(true);
+    }
+
+    async fn get_block_devices(
+        &self,
+        get_blockdevice: &dyn GetBlockDeviceInfo,
+        _ctx: Option<Context>,
+    ) -> Result<BlockDevices, ReplyError> {
+        let req = get_blockdevice.into();
+        let blockdevices = self.get_block_devices(&req).await?;
+        Ok(blockdevices)
+    }
+}
+
+#[tonic::async_trait]
+impl RegistrationOperations for Service {
+    async fn register(&self, req: &dyn RegisterInfo) -> Result<(), ReplyError> {
+        let register = req.into();
+        let service = self.clone();
+        Context::spawn(async move { service.register(&register).await }).await?;
+        Ok(())
+    }
+
+    async fn deregister(&self, req: &dyn DeregisterInfo) -> Result<(), ReplyError> {
+        let deregister = req.into();
+        let service = self.clone();
+        Context::spawn(async move { service.deregister(&deregister).await }).await?;
+        Ok(())
+    }
+}
+
 impl Service {
     /// New Node Service which uses the `registry` as its node cache and sets
     /// the `deadline` to each node's watchdog
@@ -86,8 +132,12 @@ impl Service {
     /// Callback to be called when a node's watchdog times out
     pub(super) async fn on_timeout(service: &Service, id: &NodeId) {
         let registry = service.registry.clone();
-        let state = registry.nodes().read().await;
-        if let Some(node) = state.get(id) {
+        let node = {
+            let state = registry.nodes().read().await;
+            state.get(id).cloned()
+        };
+
+        if let Some(node) = node {
             let mut node = node.write().await;
             if node.is_online() {
                 node.update_liveness().await;
@@ -228,7 +278,7 @@ impl Service {
         let mut client = grpc.connect().await?;
 
         let result = client
-            .mayastor
+            .io_engine
             .list_block_devices(ListBlockDevicesRequest { all: request.all })
             .await;
 
@@ -245,17 +295,6 @@ impl Service {
             .map(|rpc_bdev| rpc_bdev.to_mbus())
             .collect();
         Ok(BlockDevices(bdevs))
-    }
-
-    /// Get specs from the registry
-    pub(crate) async fn get_specs(&self, _request: &GetSpecs) -> Result<Specs, SvcError> {
-        let specs = self.specs().write();
-        Ok(Specs {
-            volumes: specs.get_volumes(),
-            nexuses: specs.get_nexuses(),
-            replicas: specs.get_replicas(),
-            pools: specs.get_pools(),
-        })
     }
 
     /// Get state information for all resources.

@@ -30,7 +30,7 @@ pub struct NodeState {
 pub struct NodeSpec {
     /// Node identification.
     id: NodeId,
-    /// Endpoint of the mayastor instance (gRPC)
+    /// Endpoint of the io-engine instance (gRPC)
     endpoint: String,
     /// Node labels.
     labels: NodeLabels,
@@ -51,6 +51,10 @@ impl NodeSpec {
     /// Node gRPC endpoint
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+    /// Node labels
+    pub fn labels(&self) -> &NodeLabels {
+        &self.labels
     }
     /// Node gRPC endpoint
     pub fn set_endpoint(&mut self, endpoint: String) {

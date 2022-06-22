@@ -80,6 +80,12 @@ pub enum SvcError {
     VolumeNotFound { vol_id: String },
     #[snafu(display("Volume '{}' not published", vol_id))]
     VolumeNotPublished { vol_id: String },
+    #[snafu(display("{} {} cannot be shared over invalid protocol '{}'", kind.to_string(), id, share))]
+    InvalidShareProtocol {
+        kind: ResourceKind,
+        id: String,
+        share: String,
+    },
     #[snafu(display(
         "Volume '{}' is already published on node '{}' with protocol '{}'",
         vol_id,
@@ -126,7 +132,7 @@ pub enum SvcError {
     InvalidArguments {},
     #[snafu(display("Multiple nexuses not supported"))]
     MultipleNexuses {},
-    #[snafu(display("Storage Error"))]
+    #[snafu(display("Storage Error: {}", source))]
     Store { source: StoreError },
     #[snafu(display("Storage Error: {} Config for Resource id {} not committed to the store", kind.to_string(), id))]
     StoreSave { kind: ResourceKind, id: String },
@@ -192,6 +198,11 @@ pub enum SvcError {
     StoreMissingEntry { key: String },
     #[snafu(display("The uuid '{}' for kind '{}' is not valid.", uuid, kind.to_string()))]
     InvalidUuid { uuid: String, kind: ResourceKind },
+    #[snafu(display(
+        "Unable to start rebuild. Maximum number of rebuilds permitted is {}",
+        max_rebuilds
+    ))]
+    MaxRebuilds { max_rebuilds: u32 },
 }
 
 impl From<StoreError> for SvcError {
@@ -235,6 +246,12 @@ impl From<SvcError> for ReplyError {
             },
             SvcError::AlreadyShared { kind, .. } => ReplyError {
                 kind: ReplyErrorKind::AlreadyShared,
+                resource: kind,
+                source: desc.to_string(),
+                extra: error_str,
+            },
+            SvcError::InvalidShareProtocol { kind, .. } => ReplyError {
+                kind: ReplyErrorKind::InvalidArgument,
                 resource: kind,
                 source: desc.to_string(),
                 extra: error_str,
@@ -531,6 +548,12 @@ impl From<SvcError> for ReplyError {
             SvcError::InvalidUuid { ref kind, .. } => ReplyError {
                 kind: ReplyErrorKind::InvalidArgument,
                 resource: kind.clone(),
+                source: desc.to_string(),
+                extra: error.full_string(),
+            },
+            SvcError::MaxRebuilds { .. } => ReplyError {
+                kind: ReplyErrorKind::ResourceExhausted,
+                resource: ResourceKind::Volume,
                 source: desc.to_string(),
                 extra: error.full_string(),
             },

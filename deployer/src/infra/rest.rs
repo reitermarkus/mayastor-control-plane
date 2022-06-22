@@ -1,4 +1,6 @@
 use super::*;
+use std::time::Duration;
+use utils::DEFAULT_JSON_GRPC_CLIENT_ADDR;
 
 #[async_trait]
 impl ComponentAction for Rest {
@@ -11,12 +13,13 @@ impl ComponentAction for Rest {
                     .args(&["build", "-p", "rest", "--bin", "rest"])
                     .status()?;
             }
-            let binary = Binary::from_dbg("rest")
-                .with_nats("-n")
+            let mut binary = Binary::from_dbg("rest")
                 .with_arg("--dummy-certificates")
                 .with_args(vec!["--https", "rest:8080"])
                 .with_args(vec!["--http", "rest:8081"]);
-
+            if !options.no_nats {
+                binary = binary.with_nats("-n");
+            }
             let binary = if let Some(jwk) = &options.rest_jwk {
                 binary.with_arg("--jwk").with_arg(jwk)
             } else {
@@ -45,6 +48,10 @@ impl ComponentAction for Rest {
                 binary = binary.with_args(vec!["--jaeger", &jaeger_config])
             };
 
+            if cfg.container_exists("jsongrpc") {
+                binary = binary.with_args(vec!["--json-grpc", DEFAULT_JSON_GRPC_CLIENT_ADDR]);
+            }
+
             if let Some(size) = &options.otel_max_batch_size {
                 binary = binary.with_env("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", size);
             }
@@ -66,6 +73,11 @@ impl ComponentAction for Rest {
         if options.no_rest {
             return Ok(());
         }
-        Components::wait_url("http://localhost:8081/v0/api/spec").await
+        Components::wait_url_timeouts(
+            "http://localhost:8081/v0/api/spec",
+            Duration::from_secs(10),
+            Duration::from_millis(100),
+        )
+        .await
     }
 }

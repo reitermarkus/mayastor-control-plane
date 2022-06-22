@@ -1,6 +1,6 @@
 use crate::types::v0::{
-    message_bus::{NexusId, ReplicaId},
-    store::definitions::{ObjectKey, StorableObject, StorableObjectType},
+    message_bus::{NexusId, ReplicaId, VolumeId},
+    store::definitions::{key_prefix, ObjectKey, StorableObject, StorableObjectType},
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -12,6 +12,9 @@ pub struct NexusInfo {
     #[serde(skip)]
     /// uuid of the Nexus
     pub uuid: NexusId,
+    #[serde(skip)]
+    /// uuid of the Volume
+    pub volume_uuid: Option<VolumeId>,
     /// Nexus destroyed successfully.
     pub clean_shutdown: bool,
     /// Information about children.
@@ -43,26 +46,72 @@ pub struct ChildInfo {
 }
 
 /// Key used by the store to uniquely identify a NexusInfo structure.
-pub struct NexusInfoKey(NexusId);
+/// The volume is optional because a nexus can be created which is not associated with a volume.
+pub struct NexusInfoKey {
+    volume_id: Option<VolumeId>,
+    nexus_id: NexusId,
+    mayastor_compat_v1: bool,
+}
 
-impl From<&NexusId> for NexusInfoKey {
-    fn from(id: &NexusId) -> Self {
-        Self(id.clone())
+impl NexusInfoKey {
+    /// Create a new NexusInfoKey.
+    pub fn new(volume_id: &Option<VolumeId>, nexus_id: &NexusId) -> Self {
+        Self {
+            volume_id: volume_id.clone(),
+            nexus_id: nexus_id.clone(),
+            mayastor_compat_v1: false,
+        }
+    }
+    /// Set the `mayastor_compat_v1`.
+    pub fn with_mayastor_compat_v1(mut self, compat: bool) -> Self {
+        self.mayastor_compat_v1 = compat;
+        self
+    }
+
+    /// Get the volume ID.
+    pub fn volume_id(&self) -> &Option<VolumeId> {
+        &self.volume_id
+    }
+
+    /// Get the nexus ID.
+    pub fn nexus_id(&self) -> &NexusId {
+        &self.nexus_id
+    }
+
+    fn nexus_key_mayastor_v1(&self) -> String {
+        // compatibility mode, return key at the root!
+        self.nexus_id.to_string()
     }
 }
 
 impl ObjectKey for NexusInfoKey {
     fn key(&self) -> String {
-        // no key prefix (as it's written by mayastor)
-        self.key_uuid()
+        if self.mayastor_compat_v1 {
+            return self.nexus_key_mayastor_v1();
+        }
+        let namespace = key_prefix();
+        let nexus_uuid = self.nexus_id.clone();
+        match &self.volume_id {
+            Some(volume_uuid) => {
+                format!(
+                    "{}/volume/{}/nexus/{}/info",
+                    namespace, volume_uuid, nexus_uuid
+                )
+            }
+            None => {
+                format!("{}/nexus/{}/info", namespace, nexus_uuid)
+            }
+        }
     }
 
     fn key_type(&self) -> StorableObjectType {
-        StorableObjectType::NexusInfo
+        // The key is generated directly from the `key()` function above.
+        unreachable!()
     }
 
     fn key_uuid(&self) -> String {
-        self.0.to_string()
+        // The key is generated directly from the `key()` function above.
+        unreachable!()
     }
 }
 
@@ -70,6 +119,10 @@ impl StorableObject for NexusInfo {
     type Key = NexusInfoKey;
 
     fn key(&self) -> Self::Key {
-        NexusInfoKey(self.uuid.clone())
+        NexusInfoKey {
+            volume_id: self.volume_uuid.clone(),
+            nexus_id: self.uuid.clone(),
+            mayastor_compat_v1: false,
+        }
     }
 }

@@ -9,11 +9,12 @@ use common_lib::types::v0::store::{volume::VolumeSpec, OperationMode, TraceSpan,
 use crate::core::specs::SpecOperations;
 use common::errors::SvcError;
 use common_lib::types::v0::{
-    message_bus::VolumeStatus,
+    message_bus::{DestroyVolume, VolumeStatus},
     store::{nexus_persistence::NexusInfo, replica::ReplicaSpec},
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
+use tracing::Instrument;
 
 /// Volume Garbage Collector reconciler
 #[derive(Debug)]
@@ -34,6 +35,7 @@ impl TaskPoller for GarbageCollector {
     async fn poll(&mut self, context: &PollContext) -> PollResult {
         let mut results = vec![];
         for volume in context.specs().get_locked_volumes() {
+            results.push(destroy_deleting_volume(&volume, context).await);
             results.push(disown_unused_nexuses(&volume, context).await);
             results.push(disown_unused_replicas(&volume, context).await);
         }
@@ -50,6 +52,52 @@ impl TaskPoller for GarbageCollector {
             | PollEvent::Triggered(PollTriggerEvent::VolumeDegraded)
             | PollEvent::Triggered(PollTriggerEvent::Start) => true,
             PollEvent::Shutdown | PollEvent::Triggered(_) => false,
+        }
+    }
+}
+
+#[tracing::instrument(level = "trace", skip(volume_spec, context), fields(volume.uuid = %volume_spec.lock().uuid, request.reconcile = true))]
+async fn destroy_deleting_volume(
+    volume_spec: &Arc<Mutex<VolumeSpec>>,
+    context: &PollContext,
+) -> PollResult {
+    let _guard = match volume_spec.operation_guard(OperationMode::ReconcileStart) {
+        Ok(guard) => guard,
+        Err(_) => return PollResult::Ok(PollerState::Busy),
+    };
+
+    let deleting = volume_spec.lock().status().deleting();
+    if deleting {
+        destroy_volume(volume_spec, context, OperationMode::ReconcileStep)
+            .instrument(tracing::info_span!("destroy_deleting_volume", volume.uuid = %volume_spec.lock().uuid, request.reconcile = true))
+            .await
+    } else {
+        PollResult::Ok(PollerState::Idle)
+    }
+}
+
+async fn destroy_volume(
+    volume_spec: &Arc<Mutex<VolumeSpec>>,
+    context: &PollContext,
+    mode: OperationMode,
+) -> PollResult {
+    let uuid = volume_spec.lock().uuid.clone();
+    match context
+        .specs()
+        .destroy_volume(context.registry(), &DestroyVolume::new(&uuid), mode)
+        .await
+    {
+        Ok(_) => {
+            volume_spec
+                .lock()
+                .info_span(|| tracing::info!("Successfully destroyed volume"));
+            Ok(PollerState::Idle)
+        }
+        Err(error) => {
+            volume_spec
+                .lock()
+                .error_span(|| tracing::error!(error = %error, "Failed to destroy volume"));
+            Err(error)
         }
     }
 }
@@ -184,7 +232,11 @@ async fn is_replica_healthy(
         None => {
             *nexus_info = context
                 .registry()
-                .get_nexus_info(volume_spec.last_nexus_id.as_ref(), true)
+                .get_nexus_info(
+                    Some(&volume_spec.uuid),
+                    volume_spec.last_nexus_id.as_ref(),
+                    true,
+                )
                 .await?;
             match nexus_info {
                 Some(info) => info,
@@ -211,8 +263,8 @@ async fn is_replica_healthy(
 #[cfg(test)]
 mod tests {
     use common_lib::types::v0::openapi::models;
+    use deployer_cluster::ClusterBuilder;
     use std::time::Duration;
-    use testlib::ClusterBuilder;
 
     #[tokio::test]
     async fn disown_unused_replicas() {
@@ -221,7 +273,7 @@ mod tests {
         let cluster = ClusterBuilder::builder()
             .with_rest(true)
             .with_agents(vec!["core"])
-            .with_mayastors(1)
+            .with_io_engines(1)
             .with_tmpfs_pool(POOL_SIZE_BYTES)
             .with_cache_period("1s")
             .with_reconcile_period(reconcile_period, reconcile_period)
@@ -250,7 +302,7 @@ mod tests {
         volumes_api
             .del_volume_target(&volume.spec.uuid, Some(false))
             .await
-            .expect_err("Mayastor is down");
+            .expect_err("io-engine is down");
         cluster.composer().kill(&node).await.unwrap();
 
         let volume = volumes_api.get_volume(&volume.spec.uuid).await.unwrap();

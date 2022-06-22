@@ -32,9 +32,9 @@ def test_import_a_pool_when_a_node_restarts():
     """import a pool when a node restarts."""
 
 
-@given("a control plane, Mayastor instances")
-def a_control_plane_mayastor_instances(background):
-    """a control plane, Mayastor instances."""
+@given("a control plane, Io-Engine instances")
+def a_control_plane_io_engine_instances(background):
+    """a control plane, Io-Engine instances."""
 
 
 @given("file based pool disks")
@@ -54,6 +54,7 @@ def a_pool_p0_that_could_not_be_deleted_due_to_an_unreachable_node(
     """a pool "p0" that could not be deleted due to an unreachable node."""
     assert attempt_delete_the_pool.status == http.HTTPStatus.PRECONDITION_FAILED
     assert not hasattr(ApiClient.pools_api().get_pool(pool.id), "state")
+    wait_node_offline(pool.spec.node)
 
 
 @when("the node comes back online")
@@ -82,7 +83,7 @@ POOLS_PER_NODE = 2
 
 @pytest.fixture(scope="module")
 def background():
-    Deployer.start(2, node_deadline="250ms", mayastor_env="MAYASTOR_HB_INTERVAL_SEC=0")
+    Deployer.start(2, node_deadline="250ms", io_engine_env="MAYASTOR_HB_INTERVAL_SEC=0")
     yield
     Deployer.stop()
 
@@ -112,7 +113,7 @@ def node_disks(tmp_files):
             with open(disk, "w") as file:
                 file.truncate(100 * 1024 * 1024)
 
-    # /tmp is mapped into /host/tmp within the mayastor containers
+    # /tmp is mapped into /host/tmp within the io-engine containers
     yield list(map(lambda arr: list(map(lambda file: f"/host{file}", arr)), tmp_files))
 
     for node_disks in tmp_files:
@@ -146,7 +147,7 @@ def a_pool_on_an_unreachable_offline_node(pool):
     Docker.stop_container(pool.spec.node)
     wait_node_offline(pool.spec.node)
     yield pool
-    if Docker.container_status(pool.spec.node) != "Running":
+    if Docker.container_status(pool.spec.node) != "running":
         Docker.restart_container(pool.spec.node)
     wait_node_online(pool.spec.node)
     try:

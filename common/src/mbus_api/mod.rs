@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 //! All the different messages which can be sent/received to/from the control
-//! plane services and mayastor
+//! plane services and io-engine
 //! We could split these out further into categories when they start to grow
 
 mod mbus_nats;
@@ -26,8 +26,8 @@ pub use send::*;
 use serde::{de::StdError, Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::{
-    collections::HashMap, fmt::Debug, io, marker::PhantomData, ops::Deref, str::FromStr,
-    time::Duration,
+    collections::HashMap, fmt::Debug, io, marker::PhantomData, num::TryFromIntError, ops::Deref,
+    str::FromStr, time::Duration,
 };
 use strum_macros::{AsRefStr, ToString};
 use tokio::task::JoinError;
@@ -210,7 +210,7 @@ impl ToString for MessageId {
     }
 }
 
-/// Sender identification (eg which mayastor instance sent the message)
+/// Sender identification (eg which io-engine instance sent the message)
 pub type SenderId = String;
 
 /// This trait defines all Bus Messages which must:
@@ -328,6 +328,8 @@ pub enum ResourceKind {
     Block,
     /// Watch
     Watch,
+    /// Spec
+    Spec,
 }
 
 /// Error type which is returned over the bus
@@ -346,7 +348,11 @@ pub struct ReplyError {
 
 impl From<tonic::Status> for ReplyError {
     fn from(status: Status) -> Self {
-        Self::tonic_reply_error(status.to_string(), status.full_string())
+        Self::tonic_reply_error(
+            status.code().into(),
+            status.message().to_string(),
+            status.full_string(),
+        )
     }
 }
 
@@ -358,7 +364,14 @@ impl From<ReplyError> for tonic::Status {
 
 impl From<tonic::transport::Error> for ReplyError {
     fn from(e: tonic::transport::Error) -> Self {
-        Self::tonic_reply_error(e.to_string(), e.full_string())
+        Self::tonic_reply_error(ReplyErrorKind::Aborted, e.to_string(), e.full_string())
+    }
+}
+
+/// Error type for invalid integer type conversion
+impl From<TryFromIntError> for ReplyError {
+    fn from(e: TryFromIntError) -> Self {
+        Self::invalid_argument(ResourceKind::Unknown, "", e.to_string())
     }
 }
 
@@ -387,9 +400,9 @@ impl ReplyError {
         }
     }
     /// useful when the grpc server is dropped due to panic
-    pub fn tonic_reply_error(source: String, extra: String) -> Self {
+    pub fn tonic_reply_error(kind: ReplyErrorKind, source: String, extra: String) -> Self {
         Self {
-            kind: ReplyErrorKind::Aborted,
+            kind,
             resource: ResourceKind::Unknown,
             source,
             extra,
@@ -431,6 +444,19 @@ impl ReplyError {
             extra: format!("Argument {} was not provided", arg_name),
         }
     }
+    /// for errors that can occur when serializing or deserializing JSON data
+    pub fn serde_error(
+        resource: ResourceKind,
+        error_kind: ReplyErrorKind,
+        error: serde_json::Error,
+    ) -> Self {
+        Self {
+            kind: error_kind,
+            resource,
+            source: error.to_string(),
+            extra: "".to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for ReplyError {
@@ -447,7 +473,7 @@ impl std::fmt::Display for ReplyError {
 }
 
 /// All the different variants of `ReplyError`
-#[derive(Serialize, Deserialize, Debug, Clone, strum_macros::AsRefStr)]
+#[derive(Serialize, Deserialize, Debug, Clone, strum_macros::AsRefStr, Eq, PartialEq)]
 #[allow(missing_docs)]
 pub enum ReplyErrorKind {
     WithMessage,
@@ -480,6 +506,28 @@ pub enum ReplyErrorKind {
     ReplicaCreateNumber,
     VolumeNoReplicas,
     InUse,
+}
+
+impl From<tonic::Code> for ReplyErrorKind {
+    fn from(code: tonic::Code) -> Self {
+        match code {
+            Code::InvalidArgument => Self::InvalidArgument,
+            Code::DeadlineExceeded => Self::DeadlineExceeded,
+            Code::NotFound => Self::NotFound,
+            Code::AlreadyExists => Self::AlreadyExists,
+            Code::PermissionDenied => Self::PermissionDenied,
+            Code::ResourceExhausted => Self::ResourceExhausted,
+            Code::FailedPrecondition => Self::FailedPrecondition,
+            Code::Aborted => Self::Aborted,
+            Code::OutOfRange => Self::OutOfRange,
+            Code::Unimplemented => Self::Unimplemented,
+            Code::Internal => Self::Internal,
+            Code::Unavailable => Self::Unavailable,
+            Code::DataLoss => Self::FailedPersist,
+            Code::Unauthenticated => Self::Unauthenticated,
+            _ => Self::Aborted,
+        }
+    }
 }
 
 impl From<Error> for ReplyError {

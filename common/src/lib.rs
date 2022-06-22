@@ -1,4 +1,7 @@
 pub mod mbus_api;
+/// Platform specific information, such as the cluster uid which is used as part of the pstor(etcd)
+/// key prefix.
+pub mod platform;
 pub mod store;
 pub mod types;
 
@@ -26,5 +29,8 @@ impl<F: Into<T>, T> IntoOption<T> for Option<F> {
     }
 }
 
-/// OpenTelemetry
-pub mod opentelemetry;
+/// Pre-init the Platform information.
+pub use platform::init_cluster_info_or_panic;
+
+/// Prefix for all keys stored in the persistent store (ETCD)
+pub const ETCD_KEY_PREFIX: &str = "/openebs.io/mayastor";

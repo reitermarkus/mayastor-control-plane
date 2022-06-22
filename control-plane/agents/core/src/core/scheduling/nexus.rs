@@ -6,7 +6,7 @@ use crate::core::{
 };
 use common::errors::SvcError;
 use common_lib::types::v0::{
-    message_bus::{ChildUri, NexusId, NodeId},
+    message_bus::{ChildUri, NexusId, NodeId, VolumeId},
     store::{nexus::NexusSpec, nexus_persistence::NexusInfo, volume::VolumeSpec},
 };
 use itertools::Itertools;
@@ -51,6 +51,17 @@ impl GetPersistedNexusChildren {
             Self::ReCreate(nexus) => Some(&nexus.uuid),
         }
     }
+
+    /// Get the volume ID associated with the persisted nexus info.
+    pub(crate) fn volume_id(&self) -> Option<&VolumeId> {
+        match self {
+            GetPersistedNexusChildren::Create((vol, _)) => Some(&vol.uuid),
+            GetPersistedNexusChildren::ReCreate(nexus) => match nexus.owner.as_ref() {
+                Some(volume_id) => Some(volume_id),
+                None => None,
+            },
+        }
+    }
 }
 
 /// `GetPersistedNexusChildren` context used by the filter functions for `GetPersistedNexusChildren`
@@ -82,7 +93,7 @@ impl GetPersistedNexusChildrenCtx {
         request: &GetPersistedNexusChildren,
     ) -> Result<Self, SvcError> {
         let nexus_info = registry
-            .get_nexus_info(request.nexus_info_id(), false)
+            .get_nexus_info(request.volume_id(), request.nexus_info_id(), false)
             .await?;
 
         Ok(Self {
@@ -162,7 +173,7 @@ impl CreateVolumeNexus {
 
     /// Get `Self` with a default set of filters for replicas/children according to the following
     /// criteria (any order):
-    /// 1. if it's a nexus recreation, then use only children marked as healthy by mayastor
+    /// 1. if it's a nexus recreation, then use only children marked as healthy by the io-engine
     /// 2. use only replicas which report the status of online by their state
     /// 3. use only replicas which are large enough for the volume
     pub(crate) async fn builder_with_defaults(

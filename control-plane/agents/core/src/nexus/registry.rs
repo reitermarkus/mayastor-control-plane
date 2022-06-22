@@ -1,7 +1,7 @@
 use crate::core::{registry::Registry, wrapper::*};
 use common::errors::{NexusNotFound, SvcError};
 use common_lib::types::v0::{
-    message_bus::{Nexus, NexusId, NodeId},
+    message_bus::{Nexus, NexusId, NodeId, VolumeId},
     store::nexus_persistence::{NexusInfo, NexusInfoKey},
 };
 use snafu::OptionExt;
@@ -67,16 +67,30 @@ impl Registry {
     /// missing_key_is_error determines whether not finding the key is considered an error or not
     pub(crate) async fn get_nexus_info(
         &self,
+        volume_uuid: Option<&VolumeId>,
         nexus_uuid: Option<&NexusId>,
         missing_key_is_error: bool,
     ) -> Result<Option<NexusInfo>, SvcError> {
         match nexus_uuid {
             None => Ok(None),
             Some(nexus_uuid) => {
-                match self
-                    .load_obj::<NexusInfo>(&NexusInfoKey::from(nexus_uuid))
-                    .await
-                {
+                let nexus_info_key = match volume_uuid {
+                    Some(volume_id) => NexusInfoKey::new(&Some(volume_id.clone()), nexus_uuid),
+                    None => NexusInfoKey::new(&None, nexus_uuid),
+                };
+
+                let result = match self.load_obj::<NexusInfo>(&nexus_info_key).await {
+                    Ok(result) => Ok(result),
+                    Err(SvcError::StoreMissingEntry { .. })
+                        if self.config().mayastor_compat_v1() =>
+                    {
+                        self.load_obj::<NexusInfo>(&nexus_info_key.with_mayastor_compat_v1(true))
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+
+                match result {
                     Ok(mut info) => {
                         info.uuid = nexus_uuid.clone();
                         Ok(Some(info))

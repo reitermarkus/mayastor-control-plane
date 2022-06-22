@@ -1,8 +1,13 @@
 use super::*;
 
-use crate::types::v0::store::nexus_child::NexusChild;
+use crate::{
+    mbus_api::{ReplyError, ResourceKind},
+    types::v0::store::{
+        definitions::ObjectKey, nexus_child::NexusChild, nexus_persistence::NexusInfoKey,
+    },
+};
 use serde::{Deserialize, Serialize};
-use std::{convert::TryFrom, fmt::Debug};
+use std::{convert::TryFrom, fmt::Debug, ops::RangeInclusive};
 use strum_macros::{EnumString, ToString};
 
 /// Volume Nexuses
@@ -18,7 +23,7 @@ pub struct GetNexuses {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Nexus {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub node: NodeId,
     /// name of the nexus
     pub name: String,
@@ -60,7 +65,7 @@ impl From<Nexus> for models::Nexus {
     }
 }
 
-bus_impl_string_uuid!(NexusId, "UUID of a mayastor nexus");
+bus_impl_string_uuid!(NexusId, "UUID of a nexus");
 
 /// Nexus State information
 #[derive(Serialize, Deserialize, Debug, Clone, EnumString, ToString, Eq, PartialEq)]
@@ -121,16 +126,6 @@ impl Default for NexusShareProtocol {
         Self::Nvmf
     }
 }
-impl From<i32> for NexusShareProtocol {
-    fn from(src: i32) -> Self {
-        match src {
-            0 | 1 => Self::Nvmf,
-            2 => Self::Iscsi,
-            _ => panic!("Invalid nexus share protocol {}", src),
-        }
-    }
-}
-
 impl From<NexusShareProtocol> for Protocol {
     fn from(src: NexusShareProtocol) -> Self {
         match src {
@@ -164,7 +159,7 @@ impl TryFrom<Protocol> for NexusShareProtocol {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateNexus {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub node: NodeId,
     /// the nexus uuid will be set to this
     pub uuid: NexusId,
@@ -208,6 +203,24 @@ impl NvmfControllerIdRange {
         const MAX_CONTROLLER_ID: u16 = 0xffef;
         MIN_CONTROLLER_ID ..= MAX_CONTROLLER_ID
     }
+    /// create a new NvmfControllerIdRange using provided range
+    pub fn new(start: u16, end: u16) -> Result<Self, ReplyError> {
+        if NvmfControllerIdRange::controller_id_range().contains(&start)
+            && NvmfControllerIdRange::controller_id_range().contains(&end)
+            && start < end
+        {
+            Ok(NvmfControllerIdRange(RangeInclusive::new(start, end)))
+        } else {
+            Err(ReplyError::invalid_argument(
+                ResourceKind::Nexus,
+                "nvmf_controller_id_range",
+                format!(
+                    "{}, {} values don't fall in controller id range",
+                    start, end
+                ),
+            ))
+        }
+    }
 }
 impl Default for NvmfControllerIdRange {
     fn default() -> Self {
@@ -243,6 +256,30 @@ impl NexusNvmfConfig {
     /// reservation key to be preempted
     pub fn preempt_key(&self) -> u64 {
         self.preempt_reservation_key.unwrap_or_default()
+    }
+    /// create a new NexusNvmfConfig with the args
+    pub fn new(
+        controller_id_range: NvmfControllerIdRange,
+        reservation_key: u64,
+        preempt_reservation_key: Option<u64>,
+    ) -> Self {
+        Self {
+            controller_id_range,
+            reservation_key,
+            preempt_reservation_key,
+        }
+    }
+    /// get controller_id_range
+    pub fn controller_id_range(&self) -> NvmfControllerIdRange {
+        self.controller_id_range.clone()
+    }
+    /// get reservation_key
+    pub fn reservation_key(&self) -> u64 {
+        self.reservation_key
+    }
+    /// get preempt_reservation_key
+    pub fn preempt_reservation_key(&self) -> Option<u64> {
+        self.preempt_reservation_key
     }
 }
 
@@ -291,13 +328,21 @@ impl CreateNexus {
         let name = self.owner.as_ref().map(|i| i.to_string());
         name.unwrap_or_else(|| self.uuid.to_string())
     }
+
+    /// Return the key that should be used by the Io-Engine to persist the NexusInfo.
+    pub fn nexus_info_key(&self) -> String {
+        match &self.owner {
+            Some(volume_id) => NexusInfoKey::new(&Some(volume_id.clone()), &self.uuid).key(),
+            None => NexusInfoKey::new(&None, &self.uuid).key(),
+        }
+    }
 }
 
 /// Destroy Nexus Request
 #[derive(Serialize, Deserialize, Default, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DestroyNexus {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub node: NodeId,
     /// uuid of the nexus
     pub uuid: NexusId,
@@ -316,7 +361,7 @@ impl From<Nexus> for DestroyNexus {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareNexus {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub node: NodeId,
     /// uuid of the nexus
     pub uuid: NexusId,
@@ -357,7 +402,7 @@ impl From<ShareNexus> for UnshareNexus {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UnshareNexus {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub node: NodeId,
     /// uuid of the nexus
     pub uuid: NexusId,

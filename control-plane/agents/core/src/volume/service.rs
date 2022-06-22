@@ -12,9 +12,12 @@ use common_lib::{
 };
 use grpc::{
     context::Context,
-    operations::volume::traits::{
-        CreateVolumeInfo, DestroyVolumeInfo, PublishVolumeInfo, SetVolumeReplicaInfo,
-        ShareVolumeInfo, UnpublishVolumeInfo, UnshareVolumeInfo, VolumeOperations,
+    operations::{
+        volume::traits::{
+            CreateVolumeInfo, DestroyVolumeInfo, PublishVolumeInfo, SetVolumeReplicaInfo,
+            ShareVolumeInfo, UnpublishVolumeInfo, UnshareVolumeInfo, VolumeOperations,
+        },
+        Pagination,
     },
 };
 
@@ -33,13 +36,18 @@ impl VolumeOperations for Service {
         let create_volume = req.into();
         let service = self.clone();
         let volume =
-            tokio::spawn(async move { service.create_volume(&create_volume).await }).await??;
+            Context::spawn(async move { service.create_volume(&create_volume).await }).await??;
         Ok(volume)
     }
 
-    async fn get(&self, filter: Filter, _ctx: Option<Context>) -> Result<Volumes, ReplyError> {
+    async fn get(
+        &self,
+        filter: Filter,
+        pagination: Option<Pagination>,
+        _ctx: Option<Context>,
+    ) -> Result<Volumes, ReplyError> {
         let req = GetVolumes { filter };
-        let volumes = self.get_volumes(&req).await?;
+        let volumes = self.get_volumes(&req, pagination).await?;
         Ok(volumes)
     }
 
@@ -50,7 +58,7 @@ impl VolumeOperations for Service {
     ) -> Result<(), ReplyError> {
         let destroy_volume = req.into();
         let service = self.clone();
-        tokio::spawn(async move { service.destroy_volume(&destroy_volume).await }).await??;
+        Context::spawn(async move { service.destroy_volume(&destroy_volume).await }).await??;
         Ok(())
     }
 
@@ -62,7 +70,7 @@ impl VolumeOperations for Service {
         let share_volume = req.into();
         let service = self.clone();
         let response =
-            tokio::spawn(async move { service.share_volume(&share_volume).await }).await??;
+            Context::spawn(async move { service.share_volume(&share_volume).await }).await??;
         Ok(response)
     }
 
@@ -73,7 +81,7 @@ impl VolumeOperations for Service {
     ) -> Result<(), ReplyError> {
         let unshare_volume = req.into();
         let service = self.clone();
-        tokio::spawn(async move { service.unshare_volume(&unshare_volume).await }).await??;
+        Context::spawn(async move { service.unshare_volume(&unshare_volume).await }).await??;
         Ok(())
     }
 
@@ -85,7 +93,7 @@ impl VolumeOperations for Service {
         let publish_volume = req.into();
         let service = self.clone();
         let volume =
-            tokio::spawn(async move { service.publish_volume(&publish_volume).await }).await??;
+            Context::spawn(async move { service.publish_volume(&publish_volume).await }).await??;
         Ok(volume)
     }
 
@@ -96,8 +104,9 @@ impl VolumeOperations for Service {
     ) -> Result<Volume, ReplyError> {
         let unpublish_volume = req.into();
         let service = self.clone();
-        let volume = tokio::spawn(async move { service.unpublish_volume(&unpublish_volume).await })
-            .await??;
+        let volume =
+            Context::spawn(async move { service.unpublish_volume(&unpublish_volume).await })
+                .await??;
         Ok(volume)
     }
 
@@ -109,7 +118,7 @@ impl VolumeOperations for Service {
         let set_volume_replica = req.into();
         let service = self.clone();
         let volume =
-            tokio::spawn(async move { service.set_volume_replica(&set_volume_replica).await })
+            Context::spawn(async move { service.set_volume_replica(&set_volume_replica).await })
                 .await??;
         Ok(volume)
     }
@@ -129,12 +138,24 @@ impl Service {
 
     /// Get volumes
     #[tracing::instrument(level = "info", skip(self), err, fields(volume.uuid))]
-    pub(super) async fn get_volumes(&self, request: &GetVolumes) -> Result<Volumes, SvcError> {
-        let volumes = self.registry.get_volumes().await;
+    pub(super) async fn get_volumes(
+        &self,
+        request: &GetVolumes,
+        pagination: Option<Pagination>,
+    ) -> Result<Volumes, SvcError> {
+        // The last result can only ever be false if using pagination.
+        let mut last_result = true;
 
         // The filter criteria is matched against the volume state.
         let filtered_volumes = match &request.filter {
-            Filter::None => volumes,
+            Filter::None => match &pagination {
+                Some(p) => {
+                    let paginated_volumes = self.registry.get_paginated_volume(p).await;
+                    last_result = paginated_volumes.last();
+                    paginated_volumes.result()
+                }
+                None => self.registry.get_volumes().await,
+            },
             Filter::Volume(volume_id) => {
                 tracing::Span::current().record("volume.uuid", &volume_id.as_str());
                 vec![self.registry.get_volume(volume_id).await?]
@@ -146,7 +167,13 @@ impl Service {
             }
         };
 
-        Ok(Volumes(filtered_volumes))
+        Ok(Volumes {
+            entries: filtered_volumes,
+            next_token: match last_result {
+                true => None,
+                false => pagination.map(|p| p.starting_token() + p.max_entries()),
+            },
+        })
     }
 
     /// Create volume

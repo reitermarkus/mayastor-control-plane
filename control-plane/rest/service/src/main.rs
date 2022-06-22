@@ -1,7 +1,7 @@
 mod authentication;
 mod v0;
 
-use crate::v0::CORE_CLIENT;
+use crate::v0::{CORE_CLIENT, JSON_GRPC_CLIENT};
 use actix_service::ServiceFactory;
 use actix_web::{
     body::MessageBody,
@@ -10,13 +10,12 @@ use actix_web::{
 };
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, rsa_private_keys};
-
 use std::{fs::File, io::BufReader};
 use structopt::StructOpt;
 use utils::DEFAULT_GRPC_CLIENT_ADDR;
 
 #[derive(Debug, StructOpt)]
-#[structopt(version = utils::package_info!())]
+#[structopt(name = utils::package_description!(), version = utils::version_info_str!())]
 pub(crate) struct CliArgs {
     /// The bind address for the REST interface (with HTTPS)
     /// Default: 0.0.0.0:8080
@@ -26,13 +25,16 @@ pub(crate) struct CliArgs {
     #[structopt(long)]
     http: Option<String>,
     /// The Nats Server URL or address to connect to
-    #[structopt(long, short, default_value = "nats://0.0.0.0:4222")]
-    nats: String,
+    #[structopt(long, short)]
+    nats: Option<String>,
 
-    /// The CORE gRPC Server URL or address to connect to which exposes both the Pool and Replica
-    /// services.
+    /// The CORE gRPC Server URL or address to connect to the services.
     #[structopt(long, short = "z", default_value = DEFAULT_GRPC_CLIENT_ADDR)]
     core_grpc: Uri,
+
+    /// The json gRPC Server URL or address to connect to the service.
+    #[structopt(long, short = "J")]
+    json_grpc: Option<Uri>,
 
     /// Path to the certificate file
     #[structopt(long, short, required_unless = "dummy-certificates")]
@@ -62,7 +64,7 @@ pub(crate) struct CliArgs {
     request_timeout: humantime::Duration,
 
     /// Add process service tags to the traces
-    #[structopt(short, long, env = "TRACING_TAGS", value_delimiter=",", parse(try_from_str = common_lib::opentelemetry::parse_key_value))]
+    #[structopt(short, long, env = "TRACING_TAGS", value_delimiter=",", parse(try_from_str = utils::tracing_telemetry::parse_key_value))]
     tracing_tags: Vec<KeyValue>,
 
     /// Don't use minimum timeouts for specific requests
@@ -91,45 +93,10 @@ use actix_web_opentelemetry::RequestTracing;
 use common_lib::{
     mbus_api,
     mbus_api::{BusClient, RequestMinTimeout, TimeoutOptions},
-    opentelemetry::default_tracing_tags,
 };
-use grpc::client::CoreClient;
+use grpc::{client::CoreClient, operations::jsongrpc::client::JsonGrpcClient};
 use http::Uri;
-use opentelemetry::{
-    global,
-    sdk::{propagation::TraceContextPropagator, trace::Tracer},
-    KeyValue,
-};
-
-fn init_tracing() -> Option<Tracer> {
-    if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter("info").init();
-    }
-    if let Some(agent) = CliArgs::args().jaeger {
-        let mut tracing_tags = CliArgs::args().tracing_tags;
-        tracing_tags.append(&mut default_tracing_tags(
-            utils::git_version(),
-            env!("CARGO_PKG_VERSION"),
-        ));
-        tracing_tags.dedup();
-        tracing::info!("Using the following tracing tags: {:?}", tracing_tags);
-        tracing::info!("Starting jaeger trace pipeline at {}...", agent);
-        // Start a new jaeger trace pipeline
-        global::set_text_map_propagator(TraceContextPropagator::new());
-        common_lib::opentelemetry::set_jaeger_env();
-        let tracer = opentelemetry_jaeger::new_pipeline()
-            .with_agent_endpoint(agent)
-            .with_service_name("rest-server")
-            .with_tags(tracing_tags)
-            .install_batch(opentelemetry::runtime::TokioCurrentThread)
-            .expect("Should be able to initialise the exporter");
-        Some(tracer)
-    } else {
-        None
-    }
-}
+use opentelemetry::{global, KeyValue};
 
 /// Extension trait for actix-web applications.
 pub trait OpenApiExt<T> {
@@ -212,9 +179,14 @@ fn get_jwk_path() -> Option<String> {
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
-    // need to keep the jaeger pipeline tracer alive, if enabled
-    let _tracer = init_tracing();
     utils::print_package_info!();
+    let cli_args = CliArgs::args();
+    println!("Using options: {:?}", &cli_args);
+    utils::tracing_telemetry::init_tracing(
+        "rest-server",
+        cli_args.tracing_tags.clone(),
+        cli_args.jaeger.clone(),
+    );
 
     let app = move || {
         App::new()
@@ -224,18 +196,23 @@ async fn main() -> anyhow::Result<()> {
             .configure_api(&v0::configure_api)
     };
 
-    mbus_api::message_bus_init_options(
-        BusClient::RestServer,
-        CliArgs::args().nats,
-        bus_timeout_opts(),
-    )
-    .await;
+    if let Some(addr) = CliArgs::args().nats {
+        mbus_api::message_bus_init_options(BusClient::RestServer, addr, bus_timeout_opts()).await;
+    }
 
     // Initialise the core client to be used in rest
     CORE_CLIENT
         .set(CoreClient::new(CliArgs::args().core_grpc, None).await)
         .ok()
         .expect("Expect to be initialised only once");
+
+    // Initialise the json grpc client to be used in rest
+    if CliArgs::args().json_grpc.is_some() {
+        JSON_GRPC_CLIENT
+            .set(JsonGrpcClient::new(CliArgs::args().json_grpc.unwrap(), None).await)
+            .ok()
+            .expect("Expect to be initialised only once");
+    }
 
     let server = HttpServer::new(app).bind_rustls(CliArgs::args().https, get_certificates()?)?;
     let result = if let Some(http) = CliArgs::args().http {

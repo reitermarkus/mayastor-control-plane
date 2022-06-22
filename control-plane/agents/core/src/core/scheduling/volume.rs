@@ -191,7 +191,11 @@ impl std::fmt::Debug for GetChildForRemovalContext {
 impl GetChildForRemovalContext {
     async fn new(registry: &Registry, request: &GetChildForRemoval) -> Result<Self, SvcError> {
         let nexus_info = registry
-            .get_nexus_info(request.spec.last_nexus_id.as_ref(), true)
+            .get_nexus_info(
+                Some(&request.spec.uuid),
+                request.spec.last_nexus_id.as_ref(),
+                true,
+            )
             .await?;
 
         Ok(GetChildForRemovalContext {
@@ -416,7 +420,9 @@ impl VolumeReplicasForNexusCtx {
         vol_spec: &VolumeSpec,
         nx_spec: &NexusSpec,
     ) -> Result<Self, SvcError> {
-        let nexus_info = registry.get_nexus_info(Some(&nx_spec.uuid), true).await?;
+        let nexus_info = registry
+            .get_nexus_info(Some(&vol_spec.uuid), Some(&nx_spec.uuid), true)
+            .await?;
 
         Ok(Self {
             registry: registry.clone(),
@@ -492,7 +498,7 @@ impl AddVolumeNexusReplicas {
     /// 3. use only replicas which are large enough for the volume
     /// Sorted by:
     /// 1. nexus local replicas
-    /// 2. replicas which have never been marked as faulted by mayastor
+    /// 2. replicas which have never been marked as faulted by io-engine
     /// 3. replicas from pools with more free space
     pub(crate) async fn builder_with_defaults(
         vol_spec: &VolumeSpec,

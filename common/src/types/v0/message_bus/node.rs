@@ -12,16 +12,16 @@ use strum_macros::{EnumString, ToString};
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Register {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub id: NodeId,
-    /// grpc endpoint of the mayastor instance
+    /// grpc endpoint of the io-engine instance
     pub grpc_endpoint: String,
 }
 
 /// Deregister message payload
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct Deregister {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub id: NodeId,
 }
 
@@ -33,6 +33,10 @@ pub struct GetNodes {
     filter: Filter,
 }
 impl GetNodes {
+    /// New get nodes request
+    pub fn new(filter: Filter) -> Self {
+        Self { filter }
+    }
     /// Return `Self` to request all nodes (`None`) or a specific node (`NodeId`)
     pub fn from(node_id: impl Into<Option<NodeId>>) -> Self {
         let node_id = node_id.into();
@@ -61,6 +65,10 @@ impl Node {
     /// Get new `Self` from the given parameters
     pub fn new(id: NodeId, spec: Option<NodeSpec>, state: Option<NodeState>) -> Self {
         Self { id, spec, state }
+    }
+    /// Get the node id
+    pub fn id(&self) -> &NodeId {
+        &self.id
     }
     /// Get the node specification
     pub fn spec(&self) -> Option<&NodeSpec> {
@@ -101,9 +109,9 @@ impl Default for NodeStatus {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeState {
-    /// id of the mayastor instance
+    /// id of the io-engine instance
     pub id: NodeId,
-    /// grpc_endpoint of the mayastor instance
+    /// grpc_endpoint of the io-engine instance
     pub grpc_endpoint: String,
     /// deemed status of the node
     pub status: NodeStatus,
@@ -131,7 +139,7 @@ impl NodeState {
     }
 }
 
-bus_impl_string_id!(NodeId, "ID of a mayastor node");
+bus_impl_string_id!(NodeId, "ID of a node");
 
 impl From<NodeState> for models::NodeState {
     fn from(src: NodeState) -> Self {
